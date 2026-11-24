@@ -1,3 +1,4 @@
+import pytest
 import sys
 
 from mutator.runner import CommandRunner, _clojure_command, _python_command, nearest
@@ -153,3 +154,27 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
+
+
+def _alive(pid):
+    import subprocess
+
+    listed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+    return str(pid) in listed
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows has no process groups")
+def test_a_timeout_kills_the_whole_process_tree(tmp_path):
+    marker = tmp_path / "child.pid"
+    child = f"import os, time; open(r'{marker}', 'w').write(str(os.getpid())); time.sleep(60)"
+    parent = [sys.executable, "-c", f"import subprocess, sys; subprocess.run([sys.executable, '-c', {child!r}])"]
+    result = CommandRunner().run(parent, tmp_path, 3)
+    assert result.timed_out
+    assert not _alive(int(marker.read_text()))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the cap uses a Windows job object")
+def test_a_runaway_test_hits_the_memory_cap(tmp_path):
+    hog = [sys.executable, "-c", "import time; x = bytearray(600 * 2**20); time.sleep(30)"]
+    result = CommandRunner(max_memory_mb=200).run(hog, tmp_path, 60)
+    assert result.code != 0 and result.seconds < 20

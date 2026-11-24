@@ -11,6 +11,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+if sys.platform == "win32":
+    from mutator.winjob import CREATE_SUSPENDED, Job
+
 Command = str | list[str]
 
 
@@ -70,9 +73,13 @@ def display_command(command: Command) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+MAX_MEMORY_MB = 2048
+
+
 class CommandRunner:
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, max_memory_mb: int = MAX_MEMORY_MB):
         self.verbose = verbose
+        self.max_memory_mb = max_memory_mb
 
     def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
         """Run `command` in `cwd`.
@@ -88,6 +95,7 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
+        job = Job(self.max_memory_mb) if sys.platform == "win32" else None
         try:
             process = subprocess.Popen(
                 command,
@@ -96,23 +104,40 @@ class CommandRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                creationflags=CREATE_SUSPENDED if job else 0,
                 text=True,
                 env=environment,
             )
         except OSError as exc:
+            if job:
+                job.close()
             seconds = time.monotonic() - started
             return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
+        if job:
+            job.adopt(process)
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill_tree(process, job)
             output, _err = process.communicate()
             code = 124
             timed_out = True
+        finally:
+            if job:
+                job.close()
         seconds = time.monotonic() - started
         return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+
+
+def _kill_tree(process: subprocess.Popen, job) -> None:
+    """Kill the command and every process it started."""
+
+    if job:
+        job.close()
+    else:
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 def nearest(start: Path, marker: str, stop: Path) -> Path | None:

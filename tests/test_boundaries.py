@@ -352,6 +352,7 @@ def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path
             return (None, None)
 
     monkeypatch.setattr("mutator.runner.subprocess.Popen", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr("mutator.runner.sys.platform", "linux")
     result = CommandRunner().run("true", tmp_path, 5)
     assert result.code == 1
     assert result.output == ""
